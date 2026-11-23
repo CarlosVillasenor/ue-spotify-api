@@ -5,7 +5,7 @@ Before:
     - Ensure that the MySQL server is running on localhost.
 
 Execute:
-    - uvicorn main:app --reload
+    - uvicorn main:app --reload --env-file .env
 """
 
 from fastapi import Request, FastAPI, HTTPException
@@ -44,3 +44,27 @@ async def get_users():
         cursor.close()
         connection.close()
 
+@app.post("/users")
+async def post_user(request: Request):
+    # NOTE: Modularized DB connection
+    mydb = DatabaseConnection(
+        host=required_env("databaseHost"),
+        user=required_env("databaseUser"),
+        password=required_env("databasePassword"),
+        database=required_env("databaseName"),
+    )
+
+    mydb_connection = await mydb.get_db_connection()
+    mycursor = mydb_connection.cursor()
+    data = await request.json()
+    username = data["username"]
+    age = data["age"]
+
+    mycursor.execute(
+        f"INSERT INTO users (username, age) VALUES ('{username}', '{age}');"
+    )
+    mydb_connection.commit()  # permanently saves the changes
+    return JSONResponse(
+        content={"message": "User added successfully"},
+        status_code=201,
+    )
