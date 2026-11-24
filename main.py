@@ -239,3 +239,74 @@ async def spotify_callback(
         "spotify_account_id": spotify_account_id,
         "expires_at": expires_at.isoformat(),
     }
+
+@app.post("/spotify/refresh/{spotify_account_id}")
+async def refresh_spotify_token(spotify_account_id: str):
+    db = DatabaseConnection(
+        host=required_env("databaseHost"),
+        user=required_env("databaseUser"),
+        password=required_env("databasePassword"),
+        database=required_env("databaseName"),
+    )
+    connection = await db.get_db_connection()
+    cursor = connection.cursor()
+
+    try:
+        cursor.execute(
+            "SELECT refresh_token FROM spotify_tokens WHERE spotify_account_id = %s",
+            (spotify_account_id,),
+        )
+        saved = cursor.fetchone()
+
+        if not saved:
+            raise HTTPException(status_code=404, detail="Spotify account not found")
+
+        refresh_token = (
+            saved["refresh_token"] if isinstance(saved, dict) else saved[0]
+        )
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://accounts.spotify.com/api/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                },
+                auth=(
+                    required_env("SPOTIFY_CLIENT_ID"),
+                    required_env("SPOTIFY_CLIENT_SECRET"),
+                ),
+            )
+
+        if response.is_error:
+            raise HTTPException(status_code=502, detail=response.text)
+
+        tokens = response.json()
+        expires_at = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+            + timedelta(seconds=tokens["expires_in"])
+        )
+
+        cursor.execute(
+            """
+            UPDATE spotify_tokens
+            SET access_token = %s, refresh_token = %s, expires_at = %s
+            WHERE spotify_account_id = %s
+            """,
+            (
+                tokens["access_token"],
+                tokens.get("refresh_token", refresh_token),
+                expires_at,
+                spotify_account_id,
+            ),
+        )
+        connection.commit()
+
+        return {
+            "message": "Token refreshed",
+            "expires_at": expires_at.isoformat(),
+        }
+
+    finally:
+        cursor.close()
+        connection.close()
