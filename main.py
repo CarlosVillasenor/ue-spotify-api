@@ -8,7 +8,9 @@ Execute:
     - uvicorn main:app --reload --env-file .env
 """
 
-from fastapi import Request, FastAPI, HTTPException
+from urllib.parse import urlencode
+from fastapi.responses import RedirectResponse
+from fastapi import Request, FastAPI, HTTPException, Query
 import mysql.connector
 from fastapi.responses import JSONResponse
 from configuration.connections import DatabaseConnection
@@ -119,3 +121,34 @@ async def update_user(user_id: int, request: Request):
     return JSONResponse(
         content={"message": "User updated successfully"}, status_code=200
     )
+
+#-------- SPOTIFY MANAGEMENT ----- #
+
+@app.get("/login")
+async def login():
+    params = {
+        "response_type": "code",
+        "client_id": required_env("SPOTIFY_CLIENT_ID"),
+        "scope": "user-read-private user-read-email",
+        "redirect_uri": required_env("SPOTIFY_REDIRECT_URI"),
+    }
+
+    spotify_url = (
+        "https://accounts.spotify.com/authorize?"
+        + urlencode(params)
+    )
+
+    return RedirectResponse(url=spotify_url)
+
+@app.get("/spotify/callback")
+async def spotify_callback(
+    code: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+):
+    if error:
+        return {"error": error}
+
+    if not code:
+        return {"error": "Spotify did not return an authorization code"}
+
+    return {"message": "Spotify authorization succeeded"}
