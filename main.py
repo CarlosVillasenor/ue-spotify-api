@@ -131,8 +131,9 @@ async def login():
     params = {
         "response_type": "code",
         "client_id": required_env("SPOTIFY_CLIENT_ID"),
-        "scope": "user-read-private user-read-email",
+        "scope": "user-read-private user-read-email user-library-modify playlist-modify-private",
         "redirect_uri": required_env("SPOTIFY_REDIRECT_URI"),
+        "show_dialog": "true",
     }
 
     spotify_url = (
