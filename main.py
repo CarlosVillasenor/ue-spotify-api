@@ -17,6 +17,7 @@ from configuration.connections import DatabaseConnection
 import os
 from configuration.settings import required_env
 from pydantic import BaseModel, Field
+import httpx
 
 app = FastAPI()
 
@@ -146,9 +147,53 @@ async def spotify_callback(
     error: str | None = Query(default=None),
 ):
     if error:
-        return {"error": error}
+        raise HTTPException(
+            status_code=400,
+            detail=f"Spotify authorization failed: {error}",
+        )
 
     if not code:
-        return {"error": "Spotify did not return an authorization code"}
+        raise HTTPException(
+            status_code=400,
+            detail="Spotify did not return an authorization code",
+        )
 
-    return {"message": "Spotify authorization succeeded"}
+    token_url = "https://accounts.spotify.com/api/token"
+    client_id = required_env("SPOTIFY_CLIENT_ID")
+    client_secret = required_env("SPOTIFY_CLIENT_SECRET")
+    redirect_uri = required_env("SPOTIFY_REDIRECT_URI")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            token_response = await client.post(
+                token_url,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                },
+                auth=(client_id, client_secret),
+            )
+            token_response.raise_for_status()
+
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Spotify token request failed: {exc.response.text}",
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not connect to Spotify: {exc}",
+        )
+
+    tokens = token_response.json()
+
+    # report success without putting tokens in the browser response.
+    return {
+        "message": "Spotify token exchange succeeded",
+        "token_type": tokens.get("token_type"),
+        "expires_in": tokens.get("expires_in"),
+        "scope": tokens.get("scope"),
+        "has_refresh_token": bool(tokens.get("refresh_token")),
+    }
