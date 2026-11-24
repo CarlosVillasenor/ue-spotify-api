@@ -17,6 +17,7 @@ from configuration.connections import DatabaseConnection
 import os
 from configuration.settings import required_env
 from pydantic import BaseModel, Field
+from datetime import datetime, timedelta, timezone
 import httpx
 
 app = FastAPI()
@@ -147,18 +148,11 @@ async def spotify_callback(
     error: str | None = Query(default=None),
 ):
     if error:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Spotify authorization failed: {error}",
-        )
+        raise HTTPException(status_code=400, detail=f"Spotify authorization failed: {error}")
 
     if not code:
-        raise HTTPException(
-            status_code=400,
-            detail="Spotify did not return an authorization code",
-        )
+        raise HTTPException(status_code=400, detail="Spotify did not return an authorization code")
 
-    token_url = "https://accounts.spotify.com/api/token"
     client_id = required_env("SPOTIFY_CLIENT_ID")
     client_secret = required_env("SPOTIFY_CLIENT_SECRET")
     redirect_uri = required_env("SPOTIFY_REDIRECT_URI")
@@ -166,7 +160,7 @@ async def spotify_callback(
     try:
         async with httpx.AsyncClient() as client:
             token_response = await client.post(
-                token_url,
+                "https://accounts.spotify.com/api/token",
                 data={
                     "grant_type": "authorization_code",
                     "code": code,
@@ -175,25 +169,73 @@ async def spotify_callback(
                 auth=(client_id, client_secret),
             )
             token_response.raise_for_status()
+            tokens = token_response.json()
+
+            profile_response = await client.get(
+                "https://api.spotify.com/v1/me",
+                headers={
+                    "Authorization": f"Bearer {tokens['access_token']}"
+                },
+            )
+            profile_response.raise_for_status()
+            profile = profile_response.json()
 
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Spotify token request failed: {exc.response.text}",
+            detail=f"Spotify request failed: {exc.response.text}",
         )
     except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not connect to Spotify: {exc}",
+        raise HTTPException(status_code=502, detail=f"Could not connect to Spotify: {exc}")
+
+    spotify_account_id = profile.get("account_id")
+    if not spotify_account_id:
+        raise HTTPException(status_code=502, detail="Spotify profile did not include account_id")
+
+    expires_at = (
+        datetime.now(timezone.utc).replace(tzinfo=None)
+        + timedelta(seconds=tokens["expires_in"])
+    )
+
+    db = DatabaseConnection(
+        host=required_env("databaseHost"),
+        user=required_env("databaseUser"),
+        password=required_env("databasePassword"),
+        database=required_env("databaseName"),
+    )
+    connection = await db.get_db_connection()
+    cursor = connection.cursor()
+
+    try:
+        cursor.execute(
+            """
+            INSERT INTO spotify_tokens
+                (spotify_account_id, access_token, refresh_token,
+                 token_type, expires_at, scope)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                access_token = VALUES(access_token),
+                refresh_token = VALUES(refresh_token),
+                token_type = VALUES(token_type),
+                expires_at = VALUES(expires_at),
+                scope = VALUES(scope)
+            """,
+            (
+                spotify_account_id,
+                tokens["access_token"],
+                tokens["refresh_token"],
+                tokens["token_type"],
+                expires_at,
+                tokens.get("scope", ""),
+            ),
         )
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
 
-    tokens = token_response.json()
-
-    # report success without putting tokens in the browser response.
     return {
-        "message": "Spotify token exchange succeeded",
-        "token_type": tokens.get("token_type"),
-        "expires_in": tokens.get("expires_in"),
-        "scope": tokens.get("scope"),
-        "has_refresh_token": bool(tokens.get("refresh_token")),
+        "message": "Spotify account connected and tokens saved",
+        "spotify_account_id": spotify_account_id,
+        "expires_at": expires_at.isoformat(),
     }
